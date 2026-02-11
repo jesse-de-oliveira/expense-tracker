@@ -1,5 +1,6 @@
 package com.fintech.expense_tracker;
 
+import jakarta.validation.constraints.*;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
@@ -15,12 +16,31 @@ import java.time.LocalDateTime;
 public class Transaction {
 	
 	private String transactionId;
+	
+	@NotBlank(message = "Source account cannot be empty")
+	@Size(min = 3, max = 20, message = "Account ID must be 3-20 characters")
 	private String fromAccount;
+	
+	@NotBlank(message = "Destination account cannot be empty")
+	@Size(min = 3, max =20 , message = "Account ID must be 3-20 characters")		
 	private String toAccount;
+	
+	@NotNull(message = "Amount is required")
+	@Positive(message = "Amount must be positive")
+	@DecimalMax(value = "50000.00", message = "Amount cannot exceed daily limit of R 50,000")
 	private BigDecimal amount;
+	
 	private String currency;
 	private LocalDateTime timestamp;
 	private String status;
+	private String description;
+	
+	/**
+	 * Transaction model with validation
+	 *
+	 * Validation annotations ensure data integrity
+	 * before any business logic executes
+	 */
 	
 	// Default constructor (required for JSON deserialization)
 	public Transaction() {
@@ -94,6 +114,12 @@ public class Transaction {
         this.status = status;
     }
 	
+	public String getDescription() {
+		return description;
+	}
 	
+	public void setDescription(String description) {
+		this.description = description;
+	}
 }
  
