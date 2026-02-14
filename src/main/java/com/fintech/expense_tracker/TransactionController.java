@@ -6,6 +6,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -98,6 +100,7 @@ public class TransactionController {
         response.put("timestamp", transaction.getTimestamp());
         response.put("status", transaction.getStatus());
         response.put("message", "Transaction created successfully");
+        response.put("description", transaction.getDescription());
         
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
@@ -112,12 +115,27 @@ public class TransactionController {
      *
      * @RequestParam extracts query parameters from URL
      * required=false means parameter is optional
+     * 
+     * 
+     *  @param account Filter by account (optional)
+	 *  @param status Filter by status (optional)
+	 *  @param page Page number (default 0)
+	 *  @param size Page size (default 20, max 100)
+	 *  @param sort Sort field and direction (default timestamp,desc)
      */
     @GetMapping
     public ResponseEntity<Map<String, Object>> getAllTransactions(
     	@RequestParam(required = false) String account,
-    	@RequestParam(required = false) String status) {
-    
+    	@RequestParam(required = false) String status,
+    	@RequestParam(defaultValue = "0") int page,
+    	@RequestParam(defaultValue = "20") int size,
+    	@RequestParam(defaultValue = "timestamp,desc") String sort) {
+    	
+    	// Validate pagination parameters
+    	if (page < 0) page = 0;
+    	if (size < 1) size = 20;
+    	if (size > 100) size = 100; // Prevent abuse
+    	
     	// Start with all transactions
     	List<Transaction> filtered = new ArrayList<>(transactions);
     	
@@ -137,9 +155,51 @@ public class TransactionController {
     	
     	}
     	
+    	// Sort transactions
+    	String[] sortParams = sort.split(",");
+    	String sortField = sortParams[0];
+    	String sortDirection = sortParams.length > 1 ? sortParams[1] : "asc";
+    	
+    	Comparator<Transaction> comparator;
+    	switch (sortField) {
+    		case "amount":
+    			comparator = Comparator.comparing(Transaction::getAmount);
+    			break;
+    		case "fromAccount":
+    			comparator = Comparator.comparing(Transaction::getFromAccount);
+    			break;
+    		case "timestamp":
+    		default:
+    			comparator = Comparator.comparing(Transaction::getTimestamp);
+    	}
+    	
+    	if ("desc".equalsIgnoreCase(sortDirection)) {
+    		comparator = comparator.reversed();
+    	}
+    	
+    	filtered.sort(comparator);
+    	
+    	// Pagination
+    	int start = page * size;
+    	int end = Math.min(start + size, filtered.size());
+    		
+    	List<Transaction> paginatedList;
+    	if(start >= filtered.size()) {
+    		paginatedList = new ArrayList<>(); // Empty page
+    	} else {
+    		paginatedList = filtered.subList(start, end);
+    	}
+    	
+    	// Build response
     	Map<String, Object> response = new HashMap<>();
-        response.put("count", filtered.size());
-        response.put("transactions", filtered);
+    	response.put("transactions", paginatedList);
+        response.put("currentPage", page);
+        response.put("pageSize", size);
+        response.put("totalElements", filtered.size());
+        response.put("totalPages", (int) Math.ceil((double) filtered.size() / size));
+        response.put("isFirst", page == 0);
+        response.put("isLast", end >= filtered.size());
+        
         return ResponseEntity.ok(response);
     }
     
@@ -216,13 +276,142 @@ public class TransactionController {
         return ResponseEntity.noContent().build();
     }
 
+    /**
+     * GET - Transaction statistics
+     * 
+     * URL: GET /api/transactions/stats
+     * 
+     * Returns:
+     * - Total count
+     * - Total amount transferred
+     * - Average transaction amount
+     * - Breakdown by status
+     */
+    @GetMapping("/stats")
+    public ResponseEntity<Map<String, Object>> getStatistics() {
+    	
+    	if (transactions.isEmpty()) {
+    		Map<String, Object> response = new HashMap<>();
+    		response.put("totalTransactions", 0);
+            response.put("totalAmount", BigDecimal.ZERO);
+            response.put("averageAmount", BigDecimal.ZERO);
+            response.put("statusBreakdown", new HashMap<>());
+            return ResponseEntity.ok(response);
+    	}
+    	
+    	// Total count
+    	int totalCount = transactions.size();
+    	
+    	// Total amount
+        BigDecimal totalAmount = transactions.stream()
+            .map(Transaction::getAmount)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        
+        // Average amount
+        BigDecimal averageAmount = totalAmount.divide(
+            new BigDecimal(totalCount), 
+            2, 
+            RoundingMode.HALF_UP
+        );
+        
+        // Status breakdown
+        Map<String, Long> statusBreakdown = transactions.stream()
+            .collect(Collectors.groupingBy(
+                Transaction::getStatus,
+                Collectors.counting()
+            ));
+        
+        // Build response
+        Map<String, Object> response = new HashMap<>();
+        response.put("totalTransactions", totalCount);
+        response.put("totalAmount", totalAmount);
+        response.put("averageAmount", averageAmount);
+        response.put("currency", "ZAR");
+        response.put("statusBreakdown", statusBreakdown);
+
+        return ResponseEntity.ok(response);
+
+   
+    }
     
+    /**
+     * POST - Create multiple transactions (batch)
+     *  
+     * URL: POST /api/transactions/batch
+     * Body: Array of transactions
+     * 
+     * Use case: Import transactions from CSV
+     */ 
+    @PostMapping("/batch")
+    public ResponseEntity<Map<String, Object>> createBatch(
+            @RequestBody List<@Valid Transaction> transactionList) {
+    	
+    	List<String> createdIds = new ArrayList<>();
+        List<String> errors = new ArrayList<>();
+        
+        for (Transaction transaction : transactionList) {
+            try {
+                // Same validation as single POST
+                if (transaction.getFromAccount().equals(transaction.getToAccount())) {
+                    errors.add("Cannot transfer to same account: " + transaction.getFromAccount());
+                    continue;
+                }
+                
+                String txId = "TX" + String.format("%04d", transactionCounter++);
+                transaction.setTransactionId(txId);
+                transaction.setCurrency("ZAR");
+                transaction.setTimestamp(LocalDateTime.now());
+                transaction.setStatus("completed");
+
+                transactions.add(transaction);
+                createdIds.add(txId);
+                
+            } catch (Exception e) {
+                errors.add("Failed to create transaction: " + e.getMessage());
+            }
+        }
+         
+        Map<String, Object> response = new HashMap<>();
+        response.put("successCount", createdIds.size());
+        response.put("failureCount", errors.size());
+        response.put("createdIds", createdIds);
+        if (!errors.isEmpty()) {
+            response.put("errors", errors);
+        }
+
+        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
+
+                
+    /**
+     * GET - Search transactions by description
+     * 
+     * URL: GET /api/transactions/search?q=invoice
+     * 
+     * Searches in description field (case-insensitive)
+     */
+    @GetMapping("/search")
+    public ResponseEntity<Map<String, Object>> searchTransactions(
+            @RequestParam String q) {
     
-    
-    
-    
-    
-    
-    
+    	if (q == null || q.trim().isEmpty()) {
+            throw new InvalidOperationException("Search query cannot be empty");
+        }
+    	
+    	String query = q.toLowerCase();
+    	
+    	List<Transaction> results = transactions.stream()
+    	        .filter(tx -> tx.getDescription() != null 
+    	                   && tx.getDescription().toLowerCase().contains(query))
+    	        .collect(Collectors.toList());
+    	
+    	Map<String, Object> response = new HashMap<>();
+        response.put("query", q);
+        response.put("resultCount", results.size());
+        response.put("transactions", results);
+
+        return ResponseEntity.ok(response);
+        
+    }
     
 }

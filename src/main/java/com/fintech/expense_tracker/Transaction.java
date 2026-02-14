@@ -33,6 +33,8 @@ public class Transaction {
 	private String currency;
 	private LocalDateTime timestamp;
 	private String status;
+	
+	@Size(max = 200, message = "Description cannot exceed 200 characters")
 	private String description;
 	
 	/**
@@ -121,5 +123,6 @@ public class Transaction {
 	public void setDescription(String description) {
 		this.description = description;
 	}
+	
 }
  
