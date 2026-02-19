@@ -2,6 +2,8 @@ package com.fintech.expense_tracker;
 
 import com.fintech.expense_tracker.exceptions.*;
 import jakarta.validation.Valid;
+
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -35,8 +37,10 @@ import java.util.stream.Collectors;
 @RequestMapping("/api/transactions")
 public class TransactionController {
     
-    // Simulated in-memory storage (next week: real database)
-    private List<Transaction> transactions = new ArrayList<>();
+	// CHANGED: Inject repository instead of in-memory list
+    @Autowired
+    private TransactionRepository transactionRepository;
+    
     private int transactionCounter = 1;
     
     /**
@@ -61,24 +65,12 @@ public class TransactionController {
      */
     @PostMapping
     public ResponseEntity<Map<String, Object>> createTransaction(@Valid @RequestBody Transaction transaction) {
-    	
-    	// Check for duplicate (simulated - in reality check by idempotency key)
-    	String checkId = transaction.getFromAccount() + transaction.getToAccount() 
-        				+ transaction.getAmount();
-    	for (Transaction tx : transactions) {
-    		String existingId = tx.getFromAccount() + tx.getToAccount() + tx.getAmount();
-    		if (existingId.equals(checkId)) {
-    			throw new DuplicateResourceException(
-    					"Transaction already exists with same from/to/amount");
-			}
-    	}
         
     	// Business logic validation (Level 2)
     	if(transaction.getFromAccount().equals(transaction.getToAccount())) {
     		throw new InvalidOperationException(
     			   "Cannot transfer to same account");
     	}
-    	
     	
         // Generate transaction ID & Set defaults
         String txId = "TX" + String.format("%04d", transactionCounter++);
@@ -88,7 +80,7 @@ public class TransactionController {
         transaction.setTimestamp(LocalDateTime.now());
         transaction.setStatus("completed");
         
-        transactions.add(transaction);
+        Transaction saved = transactionRepository.save(transaction);
         
         // Return 201 CREATED (not 200 OK - created new resource)
         Map<String, Object> response = new HashMap<>();
@@ -126,79 +118,29 @@ public class TransactionController {
     @GetMapping
     public ResponseEntity<Map<String, Object>> getAllTransactions(
     	@RequestParam(required = false) String account,
-    	@RequestParam(required = false) String status,
-    	@RequestParam(defaultValue = "0") int page,
-    	@RequestParam(defaultValue = "20") int size,
-    	@RequestParam(defaultValue = "timestamp,desc") String sort) {
+    	@RequestParam(required = false) String status) {
     	
-    	// Validate pagination parameters
-    	if (page < 0) page = 0;
-    	if (size < 1) size = 20;
-    	if (size > 100) size = 100; // Prevent abuse
+    	List<Transaction> transactions;
     	
-    	// Start with all transactions
-    	List<Transaction> filtered = new ArrayList<>(transactions);
-    	
-    	// This is the "magic" that lets you search by account in the URL
-    	// Filter by account if provided
-    	if(account != null) {
-    		filtered = filtered.stream()
-    				.filter(tx -> tx.getFromAccount().equals(account) || tx.getToAccount().equals(account))
-    					.collect(Collectors.toList());
-    	}
-    	
-    	// Filter by status if provided
-    	if(status != null) {
-    		filtered = filtered.stream()
-    			.filter(tx -> tx.getStatus().equals(status))
-    				.collect(Collectors.toList());
-    	
-    	}
-    	
-    	// Sort transactions
-    	String[] sortParams = sort.split(",");
-    	String sortField = sortParams[0];
-    	String sortDirection = sortParams.length > 1 ? sortParams[1] : "asc";
-    	
-    	Comparator<Transaction> comparator;
-    	switch (sortField) {
-    		case "amount":
-    			comparator = Comparator.comparing(Transaction::getAmount);
-    			break;
-    		case "fromAccount":
-    			comparator = Comparator.comparing(Transaction::getFromAccount);
-    			break;
-    		case "timestamp":
-    		default:
-    			comparator = Comparator.comparing(Transaction::getTimestamp);
-    	}
-    	
-    	if ("desc".equalsIgnoreCase(sortDirection)) {
-    		comparator = comparator.reversed();
-    	}
-    	
-    	filtered.sort(comparator);
-    	
-    	// Pagination
-    	int start = page * size;
-    	int end = Math.min(start + size, filtered.size());
-    		
-    	List<Transaction> paginatedList;
-    	if(start >= filtered.size()) {
-    		paginatedList = new ArrayList<>(); // Empty page
+    	// CHANGED: Use repository methods instead of stream filtering
+    	if (account != null && status != null) {
+    		// Filter by both account and status	
+    		transactions = transactionRepository.findByFromAccountOrToAccountAndStatus(account, account, status);
+    	} else if (account != null) {
+    		// Filter by account only
+    		transactions = transactionRepository.findByFromAccountOrToAccount(account, account);
+    	} else if (status != null) {
+    		// Filter by status only
+    		transactions = transactionRepository.findByStatus(status);
     	} else {
-    		paginatedList = filtered.subList(start, end);
+    		// No filter - get all
+    		transactions = transactionRepository.findAll();
     	}
     	
     	// Build response
     	Map<String, Object> response = new HashMap<>();
-    	response.put("transactions", paginatedList);
-        response.put("currentPage", page);
-        response.put("pageSize", size);
-        response.put("totalElements", filtered.size());
-        response.put("totalPages", (int) Math.ceil((double) filtered.size() / size));
-        response.put("isFirst", page == 0);
-        response.put("isLast", end >= filtered.size());
+    	response.put("count", transactions.size());
+    	response.put("transactions", transactions);
         
         return ResponseEntity.ok(response);
     }
@@ -215,10 +157,11 @@ public class TransactionController {
     @GetMapping("/{id}")
     public ResponseEntity<Transaction> getTransactionById(@PathVariable String id) {
 
-        return transactions.stream()
-        		.filter(tx -> tx.getTransactionId().equals(id))
-        		.findFirst().map(ResponseEntity::ok)
-        		.orElseThrow(() -> new ResourceNotFoundException("Transaction", id));
+    	// CHANGED: Use repository.findById() instead of stream
+    	Transaction transaction = transactionRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Transaction", id));
+    	
+    	return ResponseEntity.ok(transaction);
     }
     
     /**
@@ -233,21 +176,22 @@ public class TransactionController {
             @PathVariable String id,
             @RequestParam String status) {
     	
-    	 Transaction transaction = transactions.stream()
-    	            .filter(tx -> tx.getTransactionId().equals(id))
-    	            .findFirst()
-    	            .orElseThrow(() -> new ResourceNotFoundException("Transaction", id));
-    	 
-    	 // Validate status transition
-         String currentStatus = transaction.getStatus();
-         if (currentStatus.equals("refunded") && !status.equals("refunded")) {
-             throw new InvalidOperationException(
-                 "Cannot change status of refunded transaction");
-         }
+    	// CHANGED: Find from database
+        Transaction transaction = transactionRepository.findById(id)
+            .orElseThrow(() -> new ResourceNotFoundException("Transaction", id));
+
+        if (transaction.getStatus().equals("refunded") && !status.equals("refunded")) {
+            throw new InvalidOperationException(
+                "Cannot change status of refunded transaction");
+        }
+
+        transaction.setStatus(status);
+        
+     // CHANGED: Save updates to database
+        Transaction updated = transactionRepository.save(transaction);
          
-         transaction.setStatus(status);
-         
-         return ResponseEntity.ok(transaction);
+        return ResponseEntity.ok(updated);
+        
     }
     
     /**
@@ -260,18 +204,18 @@ public class TransactionController {
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> deleteTransaction(@PathVariable String id) {
 
-        Transaction transaction = transactions.stream()
-            .filter(tx -> tx.getTransactionId().equals(id))
-            .findFirst()
+    	// CHANGED: Find from database
+        Transaction transaction = transactionRepository.findById(id)
             .orElseThrow(() -> new ResourceNotFoundException("Transaction", id));
-
+        
         // Business rule: Cannot delete completed transactions
         if (transaction.getStatus().equals("completed")) {
             throw new InvalidOperationException(
                 "Cannot delete completed transaction. Use refund instead.");
         }
 
-        transactions.remove(transaction);
+     // CHANGED: Delete from database
+        transactionRepository.delete(transaction);
 
         return ResponseEntity.noContent().build();
     }
@@ -289,6 +233,9 @@ public class TransactionController {
      */
     @GetMapping("/stats")
     public ResponseEntity<Map<String, Object>> getStatistics() {
+    	
+    	// CHANGED: Get all from database
+        List<Transaction> transactions = transactionRepository.findAll();
     	
     	if (transactions.isEmpty()) {
     		Map<String, Object> response = new HashMap<>();
@@ -346,7 +293,7 @@ public class TransactionController {
     public ResponseEntity<Map<String, Object>> createBatch(
             @RequestBody List<@Valid Transaction> transactionList) {
     	
-    	List<String> createdIds = new ArrayList<>();
+    	List<Transaction> validTransactions = new ArrayList<>();
         List<String> errors = new ArrayList<>();
         
         for (Transaction transaction : transactionList) {
@@ -363,13 +310,20 @@ public class TransactionController {
                 transaction.setTimestamp(LocalDateTime.now());
                 transaction.setStatus("completed");
 
-                transactions.add(transaction);
-                createdIds.add(txId);
+                validTransactions.add(transaction);
+                
                 
             } catch (Exception e) {
                 errors.add("Failed to create transaction: " + e.getMessage());
             }
         }
+        
+        // SAVING TO DATABASE IN ONE SHOT
+        List<Transaction> savedTransactions = transactionRepository.saveAll(validTransactions);
+        
+        List<String> createdIds = savedTransactions.stream()
+                .map(Transaction::getTransactionId)
+                .collect(Collectors.toList());
          
         Map<String, Object> response = new HashMap<>();
         response.put("successCount", createdIds.size());
@@ -398,12 +352,8 @@ public class TransactionController {
             throw new InvalidOperationException("Search query cannot be empty");
         }
     	
-    	String query = q.toLowerCase();
-    	
-    	List<Transaction> results = transactions.stream()
-    	        .filter(tx -> tx.getDescription() != null 
-    	                   && tx.getDescription().toLowerCase().contains(query))
-    	        .collect(Collectors.toList());
+    	// THE REPOSITORY WAY (The database does the search!)
+        List<Transaction> results = transactionRepository.findByDescriptionContainingIgnoreCase(q);
     	
     	Map<String, Object> response = new HashMap<>();
         response.put("query", q);
@@ -412,6 +362,19 @@ public class TransactionController {
 
         return ResponseEntity.ok(response);
         
+    }
+    
+    /**
+     * GET - Find large transactions (fraud detection)
+     */
+    @GetMapping("/large")
+    public ResponseEntity<List<Transaction>> getLargeTransactions(
+            @RequestParam(defaultValue = "1000") BigDecimal threshold) {
+        
+        List<Transaction> largeTransactions = transactionRepository
+            .findByAmountGreaterThan(threshold);
+        
+        return ResponseEntity.ok(largeTransactions);
     }
     
 }
