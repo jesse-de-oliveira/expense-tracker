@@ -39,9 +39,8 @@ public class TransactionController {
     
 	// CHANGED: Inject repository instead of in-memory list
     @Autowired
-    private TransactionRepository transactionRepository;
+    private TransactionService transactionService;
     
-    private int transactionCounter = 1;
     
     /**
      * Create new transaction (POST)
@@ -66,34 +65,19 @@ public class TransactionController {
     @PostMapping
     public ResponseEntity<Map<String, Object>> createTransaction(@Valid @RequestBody Transaction transaction) {
         
-    	// Business logic validation (Level 2)
-    	if(transaction.getFromAccount().equals(transaction.getToAccount())) {
-    		throw new InvalidOperationException(
-    			   "Cannot transfer to same account");
-    	}
-    	
-        // Generate transaction ID & Set defaults
-        String txId = "TX" + String.format("%04d", transactionCounter++);
-        transaction.setTransactionId(txId);
-  
-        transaction.setCurrency("ZAR");
-        transaction.setTimestamp(LocalDateTime.now());
-        transaction.setStatus("completed");
+    	Transaction created = transactionService.createTransaction(transaction);
         
-        Transaction saved = transactionRepository.save(transaction);
-        
-        // Return 201 CREATED (not 200 OK - created new resource)
+        // Return 201 CREATED 
         Map<String, Object> response = new HashMap<>();
-        response.put("transactionId", txId);
-        response.put("fromAccount", transaction.getFromAccount());
-        response.put("toAccount", transaction.getToAccount());
-        response.put("amount", transaction.getAmount());
-        response.put("currency", transaction.getCurrency());
-        response.put("timestamp", transaction.getTimestamp());
-        response.put("status", transaction.getStatus());
+        response.put("transactionId", created.getTransactionId());
+        response.put("fromAccount", created.getFromAccount());
+        response.put("toAccount", created.getToAccount());
+        response.put("amount", created.getAmount());
+        response.put("currency", created.getCurrency());
+        response.put("timestamp", created.getTimestamp());
+        response.put("status", created.getStatus());
         response.put("message", "Transaction created successfully");
-        response.put("description", transaction.getDescription());
-        
+             
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
     
@@ -125,16 +109,16 @@ public class TransactionController {
     	// CHANGED: Use repository methods instead of stream filtering
     	if (account != null && status != null) {
     		// Filter by both account and status	
-    		transactions = transactionRepository.findByFromAccountOrToAccountAndStatus(account, account, status);
+    		transactions = transactionService.getTransactionsByAccountAndStatus(account, status);
     	} else if (account != null) {
     		// Filter by account only
-    		transactions = transactionRepository.findByFromAccountOrToAccount(account, account);
+    		transactions = transactionService.getTransactionsByAccount(account);
     	} else if (status != null) {
     		// Filter by status only
-    		transactions = transactionRepository.findByStatus(status);
+    		transactions = transactionService.getTransactionsByStatus(status);
     	} else {
     		// No filter - get all
-    		transactions = transactionRepository.findAll();
+    		transactions = transactionService.getAllTransactions();
     	}
     	
     	// Build response
@@ -157,10 +141,7 @@ public class TransactionController {
     @GetMapping("/{id}")
     public ResponseEntity<Transaction> getTransactionById(@PathVariable String id) {
 
-    	// CHANGED: Use repository.findById() instead of stream
-    	Transaction transaction = transactionRepository.findById(id)
-                .orElseThrow(() -> new ResourceNotFoundException("Transaction", id));
-    	
+    	Transaction transaction = transactionService.getTransactionById(id);
     	return ResponseEntity.ok(transaction);
     }
     
@@ -176,20 +157,7 @@ public class TransactionController {
             @PathVariable String id,
             @RequestParam String status) {
     	
-    	// CHANGED: Find from database
-        Transaction transaction = transactionRepository.findById(id)
-            .orElseThrow(() -> new ResourceNotFoundException("Transaction", id));
-
-        if (transaction.getStatus().equals("refunded") && !status.equals("refunded")) {
-            throw new InvalidOperationException(
-                "Cannot change status of refunded transaction");
-        }
-
-        transaction.setStatus(status);
-        
-     // CHANGED: Save updates to database
-        Transaction updated = transactionRepository.save(transaction);
-         
+        Transaction updated = transactionService.updateTransactionStatus(id, status);
         return ResponseEntity.ok(updated);
         
     }
@@ -204,20 +172,8 @@ public class TransactionController {
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> deleteTransaction(@PathVariable String id) {
 
-    	// CHANGED: Find from database
-        Transaction transaction = transactionRepository.findById(id)
-            .orElseThrow(() -> new ResourceNotFoundException("Transaction", id));
-        
-        // Business rule: Cannot delete completed transactions
-        if (transaction.getStatus().equals("completed")) {
-            throw new InvalidOperationException(
-                "Cannot delete completed transaction. Use refund instead.");
-        }
-
-     // CHANGED: Delete from database
-        transactionRepository.delete(transaction);
-
-        return ResponseEntity.noContent().build();
+    	transactionService.deleteTransaction(id);
+    	return ResponseEntity.noContent().build();
     }
 
     /**
@@ -235,7 +191,7 @@ public class TransactionController {
     public ResponseEntity<Map<String, Object>> getStatistics() {
     	
     	// CHANGED: Get all from database
-        List<Transaction> transactions = transactionRepository.findAll();
+        List<Transaction> transactions = transactionService.getAllTransactions();
     	
     	if (transactions.isEmpty()) {
     		Map<String, Object> response = new HashMap<>();
@@ -292,47 +248,10 @@ public class TransactionController {
     @PostMapping("/batch")
     public ResponseEntity<Map<String, Object>> createBatch(
             @RequestBody List<@Valid Transaction> transactionList) {
-    	
-    	List<Transaction> validTransactions = new ArrayList<>();
-        List<String> errors = new ArrayList<>();
         
-        for (Transaction transaction : transactionList) {
-            try {
-                // Same validation as single POST
-                if (transaction.getFromAccount().equals(transaction.getToAccount())) {
-                    errors.add("Cannot transfer to same account: " + transaction.getFromAccount());
-                    continue;
-                }
-                
-                String txId = "TX" + String.format("%04d", transactionCounter++);
-                transaction.setTransactionId(txId);
-                transaction.setCurrency("ZAR");
-                transaction.setTimestamp(LocalDateTime.now());
-                transaction.setStatus("completed");
-
-                validTransactions.add(transaction);
-                
-                
-            } catch (Exception e) {
-                errors.add("Failed to create transaction: " + e.getMessage());
-            }
-        }
+        // The Controller just calls the Service manager
+        Map<String, Object> response = transactionService.createBatch(transactionList);
         
-        // SAVING TO DATABASE IN ONE SHOT
-        List<Transaction> savedTransactions = transactionRepository.saveAll(validTransactions);
-        
-        List<String> createdIds = savedTransactions.stream()
-                .map(Transaction::getTransactionId)
-                .collect(Collectors.toList());
-         
-        Map<String, Object> response = new HashMap<>();
-        response.put("successCount", createdIds.size());
-        response.put("failureCount", errors.size());
-        response.put("createdIds", createdIds);
-        if (!errors.isEmpty()) {
-            response.put("errors", errors);
-        }
-
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
@@ -352,8 +271,7 @@ public class TransactionController {
             throw new InvalidOperationException("Search query cannot be empty");
         }
     	
-    	// THE REPOSITORY WAY (The database does the search!)
-        List<Transaction> results = transactionRepository.findByDescriptionContainingIgnoreCase(q);
+    	List<Transaction> results = transactionService.searchTransactions(q);
     	
     	Map<String, Object> response = new HashMap<>();
         response.put("query", q);
@@ -371,10 +289,8 @@ public class TransactionController {
     public ResponseEntity<List<Transaction>> getLargeTransactions(
             @RequestParam(defaultValue = "1000") BigDecimal threshold) {
         
-        List<Transaction> largeTransactions = transactionRepository
-            .findByAmountGreaterThan(threshold);
-        
-        return ResponseEntity.ok(largeTransactions);
+        List<Transaction> largeTransactions = transactionService.getLargeTransactions(threshold);
+        return ResponseEntity.ok(largeTransactions);	
     }
     
 }
