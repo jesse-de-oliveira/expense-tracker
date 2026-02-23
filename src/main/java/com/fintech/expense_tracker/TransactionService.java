@@ -36,7 +36,6 @@ public class TransactionService {
 	@Autowired
 	private TransactionRepository transactionRepository;
 	
-	private int transactionCounter = 1; //ID Generation
 	
 	 /**
      * Create new transaction with full business validation
@@ -276,7 +275,23 @@ public class TransactionService {
      * In production: Use UUID or database sequence
      */
     private String generateTransactionId() {
-    	return "TX" + String.format("%04d", transactionCounter++);
+    	List<Transaction> allTransactions = transactionRepository.findAll();
+    	
+    	if(allTransactions.isEmpty()) { return "TX0001"; }
+    	
+    	// Find highest transaction number
+    	int maxNumber = allTransactions.stream()
+    			.map(Transaction::getTransactionId)
+    			.filter(id -> id != null && id.startsWith("TX"))
+    			.map(id -> id.substring(2))
+    			.filter(numStr -> numStr.matches("\\d+"))
+    			.mapToInt(Integer::parseInt)
+    			.max()
+    			.orElse(0);
+    	
+    	// Increment and format
+    	int nextNumber = maxNumber + 1;
+    	return "TX" + String.format("%04d", nextNumber);	
     }
 
 }
